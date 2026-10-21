@@ -1,113 +1,179 @@
+
 package com.sv.fincore.dao;
 
 import com.sv.fincore.model.Cuenta;
-import com.sv.fincore.model.Transaccion;
-import com.sv.fincore.model.TransaccionAnterior;
-import com.sv.fincore.util.ArchivoUtil;
+import com.sv.fincore.util.ConexionDB;
 
-import java.io.FileInputStream;
-import java.io.IOException;
-import java.io.InvalidClassException;
-import java.io.ObjectInputStream;
-import java.io.ObjectStreamClass;
 import java.math.BigDecimal;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.*;
-import java.util.stream.Collectors;
+import java.sql.*;
+import java.util.ArrayList;
+import java.util.List;
 
 public class CuentaDAO {
 
-    private static final String RUTA = "datos/cuentas.dat";
+    public void guardar(Cuenta c) throws SQLException {
+        String verificar =
+            "SELECT 1 FROM cuentas WHERE numero_cuenta = ?";
 
-    private Map<String, Cuenta> cuentas;
+        String insertar = """
+            INSERT INTO cuentas
+            (numero_cuenta, dui_cliente, saldo, tipo_cuenta, activa)
+            VALUES (?, ?, ?, ?, ?)
+            """;
 
-    public CuentaDAO() throws IOException, ClassNotFoundException {
-        try {
-            this.cuentas = ArchivoUtil.cargar(RUTA, new HashMap<>());
-        } catch (InvalidClassException formatoAnterior) {
-            this.cuentas = cargarFormatoAnterior();
+        String actualizar = """
+            UPDATE cuentas
+            SET dui_cliente = ?, saldo = ?,
+                tipo_cuenta = ?, activa = ?
+            WHERE numero_cuenta = ?
+            """;
 
-            for (Cuenta cuenta : cuentas.values()) {
-                List<Transaccion> nuevos = new ArrayList<>();
+        try (Connection conn = ConexionDB.obtenerConexion()) {
+            boolean existe;
 
-                for (Object movimiento : cuenta.getHistorial()) {
-                    if (!(movimiento instanceof TransaccionAnterior anterior)) {
-                        throw new IOException("Movimiento anterior no reconocido");
-                    }
-                    nuevos.add(anterior.convertir());
+            try (PreparedStatement stmt =
+                    conn.prepareStatement(verificar)) {
+
+                stmt.setString(1, c.getNumeroCuenta());
+
+                try (ResultSet rs = stmt.executeQuery()) {
+                    existe = rs.next();
+                }
+            }
+
+            String sql = existe ? actualizar : insertar;
+
+            try (PreparedStatement stmt =
+                    conn.prepareStatement(sql)) {
+
+                if (existe) {
+                    stmt.setString(1, c.getDuiCliente());
+                    stmt.setBigDecimal(2, c.getSaldo());
+                    stmt.setString(3, c.getTipoCuenta());
+                    stmt.setBoolean(4, c.isActiva());
+                    stmt.setString(5, c.getNumeroCuenta());
+                } else {
+                    stmt.setString(1, c.getNumeroCuenta());
+                    stmt.setString(2, c.getDuiCliente());
+                    stmt.setBigDecimal(3, c.getSaldo());
+                    stmt.setString(4, c.getTipoCuenta());
+                    stmt.setBoolean(5, c.isActiva());
                 }
 
-                cuenta.getHistorial().clear();
-                cuenta.getHistorial().addAll(nuevos);
+                stmt.executeUpdate();
             }
-
-            Path respaldo = Path.of(RUTA + ".bak");
-            if (!Files.exists(respaldo)) {
-                Files.copy(Path.of(RUTA), respaldo);
-            }
-            persistir();
         }
     }
 
-    @SuppressWarnings("unchecked")
-    private static Map<String, Cuenta> cargarFormatoAnterior()
-            throws IOException, ClassNotFoundException {
-        try (ObjectInputStream entrada =
-                     new ObjectInputStream(new FileInputStream(RUTA)) {
-            @Override
-            protected ObjectStreamClass readClassDescriptor()
-                    throws IOException, ClassNotFoundException {
-                ObjectStreamClass descriptor = super.readClassDescriptor();
+    public Cuenta buscarPorNumero(String numeroCuenta)
+            throws SQLException {
 
-                if (descriptor.getName().equals("com.sv.fincore.model.Transaccion")) {
-                    return ObjectStreamClass.lookup(TransaccionAnterior.class);
+        String sql =
+            "SELECT * FROM cuentas WHERE numero_cuenta = ?";
+
+        try (Connection conn = ConexionDB.obtenerConexion();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+
+            stmt.setString(1, numeroCuenta);
+
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    return convertirCuenta(rs);
                 }
-                return descriptor;
             }
-        }) {
-            return (Map<String, Cuenta>) entrada.readObject();
+        }
+
+        return null;
+    }
+
+    public List<Cuenta> listar() throws SQLException {
+        List<Cuenta> cuentas = new ArrayList<>();
+
+        String sql = "SELECT * FROM cuentas";
+
+        try (Connection conn = ConexionDB.obtenerConexion();
+             PreparedStatement stmt = conn.prepareStatement(sql);
+             ResultSet rs = stmt.executeQuery()) {
+
+            while (rs.next()) {
+                cuentas.add(convertirCuenta(rs));
+            }
+        }
+
+        return cuentas;
+    }
+
+    public List<Cuenta> listarPorDui(String duiCliente)
+            throws SQLException {
+
+        List<Cuenta> cuentas = new ArrayList<>();
+
+        String sql =
+            "SELECT * FROM cuentas WHERE dui_cliente = ?";
+
+        try (Connection conn = ConexionDB.obtenerConexion();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+
+            stmt.setString(1, duiCliente);
+
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    cuentas.add(convertirCuenta(rs));
+                }
+            }
+        }
+
+        return cuentas;
+    }
+
+    public boolean actualizarSaldo(
+            String numeroCuenta,
+            BigDecimal nuevoSaldo) throws SQLException {
+
+        String sql = """
+            UPDATE cuentas
+            SET saldo = ?
+            WHERE numero_cuenta = ?
+            """;
+
+        try (Connection conn = ConexionDB.obtenerConexion();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+
+            stmt.setBigDecimal(1, nuevoSaldo);
+            stmt.setString(2, numeroCuenta);
+
+            int filasAfectadas = stmt.executeUpdate();
+            return filasAfectadas > 0;
         }
     }
 
-    public void guardar(Cuenta c) throws IOException {
-        cuentas.put(c.getNumeroCuenta(), c);
-        persistir();
-    }
+    public boolean eliminar(String numeroCuenta)
+            throws SQLException {
 
-    public Cuenta buscarPorNumero(String numeroCuenta) {
-        return cuentas.get(numeroCuenta);
-    }
+        String sql =
+            "DELETE FROM cuentas WHERE numero_cuenta = ?";
 
-    public List<Cuenta> listar() {
-        return new ArrayList<>(cuentas.values());
-    }
+        try (Connection conn = ConexionDB.obtenerConexion();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
 
-    public List<Cuenta> listarPorDui(String duiCliente) {
-        return cuentas.values().stream()
-                .filter(c -> c.getDuiCliente().equals(duiCliente))
-                .collect(Collectors.toList());
-    }
+            stmt.setString(1, numeroCuenta);
 
-    public boolean actualizarSaldo(String numeroCuenta, BigDecimal nuevoSaldo)
-            throws IOException {
-        Cuenta c = cuentas.get(numeroCuenta);
-        if (c == null) return false;
-
-        c.setSaldo(nuevoSaldo);
-        persistir();
-        return true;
-    }
-
-    public boolean eliminar(String numeroCuenta) throws IOException {
-        if (cuentas.remove(numeroCuenta) != null) {
-            persistir();
-            return true;
+            return stmt.executeUpdate() > 0;
         }
-        return false;
     }
 
-    private void persistir() throws IOException {
-        ArchivoUtil.guardar(RUTA, cuentas);
+    private Cuenta convertirCuenta(ResultSet rs)
+            throws SQLException {
+
+        Cuenta cuenta = new Cuenta(
+            rs.getString("numero_cuenta"),
+            rs.getString("dui_cliente"),
+            rs.getString("tipo_cuenta")
+        );
+
+        cuenta.setSaldo(rs.getBigDecimal("saldo"));
+        cuenta.setActiva(rs.getBoolean("activa"));
+
+        return cuenta;
     }
 }
